@@ -232,8 +232,11 @@ type frontend interface {
 func init() {
 	frontends := map[string]interface{}{}
 
+	images := integration.UnixOrWindows(
+		[]string{"busybox:latest", "alpine:latest"},
+		[]string{"nanoserver:latest"})
 	opts = []integration.TestOpt{
-		integration.WithMirroredImages(integration.OfficialImages("busybox:latest", "alpine:latest")),
+		integration.WithMirroredImages(integration.OfficialImages(images...)),
 		integration.WithMatrix("frontend", frontends),
 	}
 
@@ -256,20 +259,13 @@ func init() {
 func TestIntegration(t *testing.T) {
 	integration.Run(t, allTests, opts...)
 
-	integration.Run(t, securityTests, append(append(opts, securityOpts...),
-		integration.WithMatrix("security.insecure", map[string]interface{}{
-			"granted": securityInsecureGranted,
-			"denied":  securityInsecureDenied,
-		}))...)
-	integration.Run(t, networkTests, append(opts,
-		integration.WithMatrix("network.host", map[string]interface{}{
-			"granted": networkHostGranted,
-			"denied":  networkHostDenied,
-		}))...)
 	integration.Run(t, lintTests, opts...)
 	integration.Run(t, heredocTests, opts...)
 	integration.Run(t, outlineTests, opts...)
 	integration.Run(t, targetsTests, opts...)
+
+	// the rest of the tests are meant for non-Windows, skipping on Windows.
+	integration.SkipOnPlatform(t, "windows")
 
 	integration.Run(t, reproTests, append(opts,
 		// Only use the amd64 digest,  regardless to the host platform
@@ -277,6 +273,18 @@ func TestIntegration(t *testing.T) {
 			"amd64/bullseye-20230109-slim:latest": "docker.io/amd64/debian:bullseye-20230109-slim@sha256:1acb06a0c31fb467eb8327ad361f1091ab265e0bf26d452dea45dcb0c0ea5e75",
 		}),
 	)...)
+
+	integration.Run(t, securityTests, append(append(opts, securityOpts...),
+		integration.WithMatrix("security.insecure", map[string]interface{}{
+			"granted": securityInsecureGranted,
+			"denied":  securityInsecureDenied,
+		}))...)
+
+	integration.Run(t, networkTests, append(opts,
+		integration.WithMatrix("network.host", map[string]interface{}{
+			"granted": networkHostGranted,
+			"denied":  networkHostDenied,
+		}))...)
 }
 
 func testEmptyStringArgInEnv(t *testing.T, sb integration.Sandbox) {
@@ -389,14 +397,20 @@ echo -n $my_arg $* > /out
 }
 
 func testEnvEmptyFormatting(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(
+		`
 FROM busybox AS build
 ENV myenv foo%sbar
 RUN [ "$myenv" = 'foo%sbar' ]
-`)
+`,
+		`
+FROM nanoserver AS build
+ENV myenv foo%sbar
+RUN if %myenv% NEQ foo%sbar (exit 1)
+`,
+	))
 
 	dir := integration.Tmpdir(
 		t,
@@ -425,23 +439,36 @@ RUN [ "$myenv" = 'foo%sbar' ]
 }
 
 func testDockerignoreOverride(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(
+		`
 FROM busybox
 COPY . .
 RUN [ -f foo ] && [ ! -f bar ]
-`)
+`,
+		`
+FROM nanoserver
+COPY . .
+RUN if exist foo (if not exist bar (exit 0) else (exit 1))
+`,
+	))
 
 	ignore := []byte(`
 bar
 `)
 
-	dockerfile2 := []byte(`
+	dockerfile2 := []byte(integration.UnixOrWindows(
+		`
 FROM busybox
 COPY . .
 RUN [ ! -f foo ] && [ -f bar ]
-`)
+`,
+		`
+FROM nanoserver
+COPY . .
+RUN if not exist foo (if exist bar (exit 0) else (exit 1))
+`,
+	))
 
 	ignore2 := []byte(`
 foo
@@ -482,15 +509,22 @@ foo
 }
 
 func testEmptyDestDir(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(
+		`
 FROM busybox
 ENV empty=""
 COPY testfile $empty
 RUN [ "$(cat testfile)" == "contents0" ]
-`)
+`,
+		`
+FROM nanoserver
+COPY testfile ''
+RUN cmd /V:on /C "set /p tfcontent=<testfile \
+	& if !tfcontent! NEQ contents0 (exit 1)"
+`,
+	))
 
 	dir := integration.Tmpdir(
 		t,
@@ -3470,9 +3504,13 @@ COPY --chmod=0644 foo /
 COPY --chmod=777 bar /baz
 COPY --chmod=0 foo /foobis
 
+ARG mode
+COPY --chmod=${mode} foo /footer
+
 RUN stat -c "%04a" /foo  > /out/fooperm
 RUN stat -c "%04a" /baz  > /out/barperm
 RUN stat -c "%04a" /foobis  > /out/foobisperm
+RUN stat -c "%04a" /footer  > /out/footerperm
 FROM scratch
 COPY --from=base /out /
 `)
@@ -3497,6 +3535,9 @@ COPY --from=base /out /
 				OutputDir: destDir,
 			},
 		},
+		FrontendAttrs: map[string]string{
+			"build-arg:mode": "755",
+		},
 		LocalMounts: map[string]fsutil.FS{
 			dockerui.DefaultLocalNameDockerfile: dir,
 			dockerui.DefaultLocalNameContext:    dir,
@@ -3516,6 +3557,10 @@ COPY --from=base /out /
 	dt, err = os.ReadFile(filepath.Join(destDir, "foobisperm"))
 	require.NoError(t, err)
 	require.Equal(t, "0000\n", string(dt))
+
+	dt, err = os.ReadFile(filepath.Join(destDir, "footerperm"))
+	require.NoError(t, err)
+	require.Equal(t, "0755\n", string(dt))
 }
 
 func testCopyInvalidChmod(t *testing.T, sb integration.Sandbox) {
@@ -3818,9 +3863,14 @@ FROM busybox AS build
 ADD --chmod=644 %[1]s /tmp/foo1
 ADD --chmod=755 %[1]s /tmp/foo2
 ADD --chmod=0413 %[1]s /tmp/foo3
+
+ARG mode
+ADD --chmod=${mode} %[1]s /tmp/foo4
+
 RUN stat -c "%%04a" /tmp/foo1 >> /dest && \
 	stat -c "%%04a" /tmp/foo2 >> /dest && \
-	stat -c "%%04a" /tmp/foo3 >> /dest
+	stat -c "%%04a" /tmp/foo3 >> /dest && \
+	stat -c "%%04a" /tmp/foo4 >> /dest
 
 FROM scratch
 COPY --from=build /dest /dest
@@ -3844,6 +3894,9 @@ COPY --from=build /dest /dest
 				OutputDir: destDir,
 			},
 		},
+		FrontendAttrs: map[string]string{
+			"build-arg:mode": "400",
+		},
 		LocalMounts: map[string]fsutil.FS{
 			dockerui.DefaultLocalNameDockerfile: dir,
 			dockerui.DefaultLocalNameContext:    dir,
@@ -3853,7 +3906,7 @@ COPY --from=build /dest /dest
 
 	dt, err := os.ReadFile(filepath.Join(destDir, "dest"))
 	require.NoError(t, err)
-	require.Equal(t, []byte("0644\n0755\n0413\n"), dt)
+	require.Equal(t, []byte("0644\n0755\n0413\n0400\n"), dt)
 }
 
 func testAddInvalidChmod(t *testing.T, sb integration.Sandbox) {

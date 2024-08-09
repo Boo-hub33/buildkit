@@ -669,13 +669,13 @@ This can be used to:
 
 The supported mount types are:
 
-| Type                                     | Description                                                                                               |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| [`bind`](#run---mounttypebind) (default) | Bind-mount context directories (read-only).                                                               |
-| [`cache`](#run---mounttypecache)         | Mount a temporary directory to cache directories for compilers and package managers.                      |
-| [`tmpfs`](#run---mounttypetmpfs)         | Mount a `tmpfs` in the build container.                                                                   |
-| [`secret`](#run---mounttypesecret)       | Allow the build container to access secure files such as private keys without baking them into the image. |
-| [`ssh`](#run---mounttypessh)             | Allow the build container to access SSH keys via SSH agents, with support for passphrases.                |
+| Type                                     | Description                                                                                                              |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------                |
+| [`bind`](#run---mounttypebind) (default) | Bind-mount context directories (read-only).                                                                              |
+| [`cache`](#run---mounttypecache)         | Mount a temporary directory to cache directories for compilers and package managers.                                     |
+| [`tmpfs`](#run---mounttypetmpfs)         | Mount a `tmpfs` in the build container.                                                                                  |
+| [`secret`](#run---mounttypesecret)       | Allow the build container to access secure files such as private keys without baking them into the image or build cache. |
+| [`ssh`](#run---mounttypessh)             | Allow the build container to access SSH keys via SSH agents, with support for passphrases.                               |
 
 ### RUN --mount=type=bind
 
@@ -1645,6 +1645,18 @@ If the container root filesystem doesn't contain either `/etc/passwd` or
 `/etc/group` files and either user or group names are used in the `--chown`
 flag, the build will fail on the `COPY` operation. Using numeric IDs requires
 no lookup and does not depend on container root filesystem content.
+
+With the Dockerfile syntax version 1.10.0 and later,
+the `--chmod` flag supports variable interpolation,
+which lets you define the permission bits using build arguments:
+
+```dockerfile
+# syntax=docker/dockerfile:1.10
+FROM alpine
+WORKDIR /src
+ARG MODE=440
+COPY --chmod=$MODE . .
+```
 
 ### COPY --link
 
